@@ -13,6 +13,10 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> eframe::Result<()> {
+    let server_addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+
     // Inicializar GUI
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 400.0]),
@@ -21,18 +25,19 @@ async fn main() -> eframe::Result<()> {
     eframe::run_native(
         "P02 - Cifrado Híbrido",
         options,
-        Box::new(|_cc| Ok(Box::new(ClientApp::new()))),
+        Box::new(move |_cc| Ok(Box::new(ClientApp::new(server_addr)))),
     )
 }
 
 struct AppState {
     username: String,
+    server_addr: String,
     connected: bool,
     users: std::collections::HashMap<String, String>,
     selected_user: String,
     file_path: Option<PathBuf>,
     status_msg: String,
-    
+
     // Crypto
     priv_key: RsaPrivateKey,
     pub_key_pem: String,
@@ -45,17 +50,18 @@ struct ClientApp {
 
 impl Default for ClientApp {
     fn default() -> Self {
-        Self::new()
+        Self::new("127.0.0.1:8080".to_string())
     }
 }
 
 impl ClientApp {
-    fn new() -> Self {
+    fn new(server_addr: String) -> Self {
         let (priv_key, pub_key) = generate_rsa_keys();
         let pub_key_pem = pub_key_to_pem(&pub_key);
 
         let state = Arc::new(Mutex::new(AppState {
             username: String::new(),
+            server_addr,
             connected: false,
             users: std::collections::HashMap::new(),
             selected_user: String::new(),
@@ -73,16 +79,21 @@ impl ClientApp {
 
     fn connect(&mut self, ctx: egui::Context) {
         let state_clone = self.state.clone();
-        
+
         let (tx, mut rx) = mpsc::channel::<Message>(32);
         self.tx_to_server = Some(tx.clone());
 
+        let server_addr = {
+            let guard = self.state.lock().unwrap();
+            guard.server_addr.clone()
+        };
+
         tokio::spawn(async move {
-            let stream_result = TcpStream::connect("127.0.0.1:8080").await;
-            
+            let stream_result = TcpStream::connect(&server_addr).await;
+
             if let Ok(stream) = stream_result {
                 let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
-                
+
                 // Enviar Register inicial
                 let reg_msg = {
                     let guard = state_clone.lock().unwrap();
@@ -91,13 +102,13 @@ impl ClientApp {
                         public_key_pem: guard.pub_key_pem.clone(),
                     }
                 };
-                
+
                 let _ = framed.send(Bytes::from(bincode::serialize(&reg_msg).unwrap())).await;
-                
+
                 {
                     let mut guard = state_clone.lock().unwrap();
                     guard.connected = true;
-                    guard.status_msg = "Conectado al servidor Relay".to_string();
+                    guard.status_msg = format!("Conectado al servidor Relay ({})", server_addr);
                 }
                 ctx.request_repaint();
 
@@ -120,7 +131,7 @@ impl ClientApp {
                                 }
                             }
                         }
-                        
+
                         Some(out_msg) = rx.recv() => {
                             let b = bincode::serialize(&out_msg).unwrap();
                             if framed.send(Bytes::from(b)).await.is_err() {
@@ -131,7 +142,7 @@ impl ClientApp {
                 }
             } else {
                 let mut guard = state_clone.lock().unwrap();
-                guard.status_msg = "Error al conectar con 127.0.0.1:8080".to_string();
+                guard.status_msg = format!("Error al conectar con {}", server_addr);
                 ctx.request_repaint();
             }
         });
@@ -184,19 +195,28 @@ fn handle_server_message(msg: Message, state: Arc<Mutex<AppState>>, ctx: egui::C
             println!("Recibiendo archivo de {}...", from);
             // 1. Descifrar llave AES usando llave RSA PRIVADA local
             let aes_key_bytes = shared::rsa_utils::decrypt_rsa(&guard.priv_key, &encrypted_aes_key);
-            
+
             if aes_key_bytes.len() == 32 {
                 let mut aes_key = [0u8; 32];
                 aes_key.copy_from_slice(&aes_key_bytes);
-                
+
                 // 2. Descifrar el archivo usando la llave AES
                 let file_data = shared::aes_utils::decrypt_aes(&aes_key, encrypted_file_data);
-                
+
                 // Guardar como p_recibido.txt en el escritorio como comprobación
-                if let Ok(desktop_path) = std::env::var("USERPROFILE") {
-                    let mut path = PathBuf::from(desktop_path);
-                    path.push("Desktop");
-                    path.push(format!("p_recibido_de_{}.txt", from));
+                let desktop_path = if cfg!(target_os = "windows") {
+                    std::env::var("USERPROFILE").map(|p| PathBuf::from(p).join("Desktop"))
+                } else if cfg!(target_os = "macos") {
+                    std::env::var("HOME").map(|p| PathBuf::from(p).join("Desktop"))
+                } else {
+                    // Linux: respetar XDG, fallback a ~/Desktop
+                    std::env::var("XDG_DESKTOP_DIR")
+                        .map(PathBuf::from)
+                        .or_else(|_| std::env::var("HOME").map(|p| PathBuf::from(p).join("Desktop")))
+                };
+
+                if let Ok(desktop) = desktop_path {
+                    let path = desktop.join(format!("p_recibido_de_{}.txt", from));
                     let _ = std::fs::write(&path, file_data);
                     guard.status_msg = format!("¡Archivo guardado en {:?}", path);
                 }
@@ -222,10 +242,15 @@ impl eframe::App for ClientApp {
 
             if !state.connected {
                 ui.horizontal(|ui: &mut egui::Ui| {
+                    ui.label("Servidor:");
+                    ui.text_edit_singleline(&mut state.server_addr);
+                });
+
+                ui.horizontal(|ui: &mut egui::Ui| {
                     ui.label("Usuario:");
                     ui.text_edit_singleline(&mut state.username);
                 });
-                
+
                 if ui.button("Conectar").clicked() && !state.username.is_empty() {
                     drop(state); // Liberar lock antes de connect
                     self.connect(ctx.clone());
@@ -235,9 +260,9 @@ impl eframe::App for ClientApp {
                 ui.horizontal(|ui: &mut egui::Ui| {
                     ui.label(format!("Conectado como: {}", state.username));
                 });
-                
+
                 ui.separator();
-                
+
                 ui.horizontal(|ui: &mut egui::Ui| {
                     if ui.button("Seleccionar Archivo (p.txt)").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_file() {
@@ -270,7 +295,7 @@ impl eframe::App for ClientApp {
             }
 
             ui.separator();
-            ui.label(&state.status_msg); // Actualizada en handle_server_message o connect
+            ui.label(&state.status_msg);
         });
     }
 }
