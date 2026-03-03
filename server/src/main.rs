@@ -6,7 +6,7 @@ use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use bytes::Bytes;
 
-type ClientMap = Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>;
+type ClientMap = Arc<Mutex<HashMap<String, (String, mpsc::Sender<Message>)>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,13 +18,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (socket, addr) = listener.accept().await?;
         println!("Nueva conexión recibida de: {}", addr);
-        
+
         let clients = clients.clone();
-        
+
         tokio::spawn(async move {
             let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
             let mut username = None;
-            
+
             // Canal para que otros threads envíen mensajes a ESTE cliente
             let (tx, mut rx) = mpsc::channel::<Message>(32);
 
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    
+
                     // Recibir mensajes desde el canal interno MPSC y mandarlos al socket
                     Some(msg) = rx.recv() => {
                         if let Ok(b) = bincode::serialize(&msg) {
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            
+
             // Limpieza al desconectar
             if let Some(user) = username {
                 let mut guard = clients.lock().await;
@@ -87,21 +87,19 @@ async fn handle_message(
         Message::Register { username, public_key_pem } => {
             println!("Registrando usuario: {}", username);
             *current_username = Some(username.clone());
-            
+
             let mut guard = clients.lock().await;
-            guard.insert(username.clone(), my_tx);
-            
+            guard.insert(username.clone(), (public_key_pem, my_tx));
+
             broadcast_client_list(&guard).await;
         }
         Message::SendFile { from, to, encrypted_aes_key, encrypted_file_data } => {
             let guard = clients.lock().await;
-            if let Some(tx) = guard.get(&to) {
+            if let Some((_, tx)) = guard.get(&to) {
                 println!("Enrutando archivo de {} hacia {}", from, to);
-                // Reenviar el mismo mensaje
                 let _ = tx.send(Message::SendFile { from, to, encrypted_aes_key, encrypted_file_data }).await;
             } else {
                 println!("Usuario destino '{}' no encontrado", to);
-                // Si falla, le mandamos un error al emisor original (necesitaríamos su tx)
             }
         }
         _ => {}
@@ -109,16 +107,11 @@ async fn handle_message(
     Ok(())
 }
 
-async fn broadcast_client_list(clients: &tokio::sync::MutexGuard<'_, HashMap<String, mpsc::Sender<Message>>>) {
-    // Nota: Por simplicidad en la Práctica 2, para enviar la lista a todos,
-    // solo mandaremos los nombres (la lista de tuplas pedía la llave pública).
-    // Modificaremos aquí para ajustarnos rápdio, o podemos pedir a Register guardar la llave pública.
-    
-    // Dejaremos la actualización de lista como TODO o lo simplificaremos por ahora.
-    let keys: Vec<(String, String)> = clients.keys().map(|k| (k.clone(), String::new())).collect();
+async fn broadcast_client_list(clients: &tokio::sync::MutexGuard<'_, HashMap<String, (String, mpsc::Sender<Message>)>>) {
+    let keys: Vec<(String, String)> = clients.iter().map(|(name, (pem, _))| (name.clone(), pem.clone())).collect();
     let msg = Message::ClientList(keys);
-    
-    for tx in clients.values() {
+
+    for (_, tx) in clients.values() {
         let _ = tx.send(msg.clone()).await;
     }
 }
