@@ -167,16 +167,6 @@ impl ClientApp {
                 } else {
                     println!("No se encontró la llave pública del usuario {}", to_user);
                 }
-                
-                // Nota: Por diseño correcto P2P, deberíamos pedir primero la PEM de 'to_user' al servidor.
-                // Como simplificación de la práctica, asumimos que todos reciben la broadcast de ClientList
-                // pero nuestro mensaje ClientList actual solo manda nombres. 
-                // AQUÍ HABRÁ QUE OBTENER LA LLAVE PÚBLICA REAL usando request.
-                // Simularemos un fallo intencional si no la tenemos.
-                
-                tokio::spawn(async move {
-                    // TODO: Aquí enviaríamos el mensaje
-                });
             }
         }
     }
