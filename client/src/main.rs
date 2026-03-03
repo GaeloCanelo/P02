@@ -1,7 +1,7 @@
 use eframe::egui;
 use shared::protocol::Message;
 use shared::rsa_utils::{generate_rsa_keys, pub_key_to_pem};
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::RsaPrivateKey;
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
@@ -176,7 +176,7 @@ fn handle_server_message(msg: Message, state: Arc<Mutex<AppState>>, ctx: egui::C
     let mut guard = state.lock().unwrap();
     match msg {
         Message::ClientList(list) => {
-            guard.users = list.into_iter().map(|(n, p)| (n, p)).collect();
+            guard.users = list.into_iter().collect();
             let my_username = guard.username.clone();
             guard.users.retain(|u, _| u != &my_username);
         }
@@ -252,7 +252,7 @@ impl eframe::App for ClientApp {
                 ui.horizontal(|ui: &mut egui::Ui| {
                     ui.label("Enviar a:");
                     let users_clone = state.users.clone();
-                    egui::ComboBox::from_id_source("users_combo")
+                    egui::ComboBox::from_id_salt("users_combo")
                         .selected_text(&state.selected_user)
                         .show_ui(ui, |ui: &mut egui::Ui| {
                             for (user, _) in &users_clone {
