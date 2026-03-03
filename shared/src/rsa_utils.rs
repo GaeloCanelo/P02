@@ -1,5 +1,5 @@
 use rsa::{RsaPrivateKey, RsaPublicKey, Pkcs1v15Encrypt};
-use rsa::pkcs8::{EncodePublicKey, DecodePublicKey, EncodePrivateKey, DecodePrivateKey};
+use rsa::pkcs8::{EncodePublicKey, DecodePublicKey};
 use rand_core::OsRng;
 
 pub fn generate_rsa_keys() -> (RsaPrivateKey, RsaPublicKey) {
